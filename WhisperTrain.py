@@ -81,6 +81,9 @@ class WhisperMultilingualASRDataset(Dataset):
             labels = self.processor.tokenizer(
                 text=text_with_language
             ).input_ids
+
+            # prompt_ids = self.processor.tokenizer.get_decoder_prompt_ids(language=self.language, task="transcribe") 
+            # labels = self.processor.tokenizer(text=text).input_ids 
             
             result = {
                 "input_features": features,
@@ -137,7 +140,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
 def train_whisper():
     # Specify which GPUs to use
-    gpu_ids = [4, 5, 6, 7]  # Change these to your desired GPU IDs
+    gpu_ids = [2, 3, 4, 5, 6, 7]  # Change these to your desired GPU IDs
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
     
     # Initialize process group for DDP
@@ -155,8 +158,8 @@ def train_whisper():
 
     num_steps = 0
     epochs = 5
-    batch_size = 6
-    gradient_steps = 2
+    batch_size = 8
+    gradient_steps = 1
 
     # Initialize processor and model
     model_name = "openai/whisper-large-v3-turbo"
@@ -175,11 +178,12 @@ def train_whisper():
     #     )
 
     # Load datasets
-    data_dir = "/raid/rakhat_meiramov/projects/asr/21NovData"  # Update this path
+    data_dir = "/raid/rakhat_meiramov/projects/asr/21NovData/Cleaned_JSON"  # Update this path
     train_datasets = []
     eval_datasets = []
     
-    languages = ['en', 'ru', 'kk', 'tr']
+    # languages = ['en', 'ru', 'kk', 'tr']
+    languages = ['kk']
     
     for lang in languages:
         # Training dataset
@@ -210,13 +214,13 @@ def train_whisper():
             name="whisper-v3-turbo-finetune",
             config={
                 "model_name": "openai/whisper-large-v3-turbo",
-                "learning_rate": 1e-5,
+                "learning_rate": 1e-7,
                 "batch_size_per_gpu": batch_size,
                 "total_batch_size": batch_size * world_size,
                 "grad_accumulation": gradient_steps,
-                "languages": ['en', 'ru', 'kk', 'tr'],
-                "warmup_steps": 0.1 * num_steps,
-                "max_steps": torch.cuda.device_count(),
+                "languages": languages,
+                "warmup_steps": 0.01 * num_steps,
+                "max_steps": num_steps,
                 "num_gpus": world_size,
                 "gpu_ids": gpu_ids
             }
@@ -247,24 +251,26 @@ def train_whisper():
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=gradient_steps,
-        learning_rate=1e-5,
+        # gradient_checkpointing=True,
+        learning_rate=1e-7,
         warmup_ratio=0.01,
         max_steps=num_steps,
-        seed=42,                    # Set random seed for reproducibility
-        data_seed=42,
+        # seed=42,                    # Set random seed for reproducibility
+        # data_seed=42,
         fp16=True,
         evaluation_strategy="steps",
-        eval_steps=num_steps//(epochs * 2), 
+        eval_steps=num_steps//(epochs*4), 
         save_strategy="steps",
         predict_with_generate=True,
         generation_max_length=225,
-        save_steps=num_steps//(epochs * 2),
+        save_steps=num_steps//(epochs*4),
         logging_strategy="steps",
         logging_steps=50,
         load_best_model_at_end=True,
         metric_for_best_model="wer",
         greater_is_better=False,
         dataloader_num_workers=8,
+        eval_on_start=True,
         # Distributed training arguments
         ddp_find_unused_parameters=False,
         local_rank=local_rank,
