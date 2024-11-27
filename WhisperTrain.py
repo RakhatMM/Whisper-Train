@@ -74,16 +74,16 @@ class WhisperMultilingualASRDataset(Dataset):
             language = self.lang_map[self.language]
             text = item['text']
             
-            # Add language token to text
-            text_with_language = f"<|{language}|> {text}"
+            # # Add language token to text
+            # text_with_language = f"<|{language}|> {text}"
             
-            # Tokenize with language
-            labels = self.processor.tokenizer(
-                text=text_with_language
-            ).input_ids
+            # # Tokenize with language
+            # labels = self.processor.tokenizer(
+            #     text=text_with_language
+            # ).input_ids
 
-            # prompt_ids = self.processor.tokenizer.get_decoder_prompt_ids(language=self.language, task="transcribe") 
-            # labels = self.processor.tokenizer(text=text).input_ids 
+            prompt_ids = self.processor.tokenizer.get_decoder_prompt_ids(language=self.language, task="transcribe") 
+            labels = self.processor.tokenizer(text=text).input_ids 
             
             result = {
                 "input_features": features,
@@ -140,7 +140,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
 def train_whisper():
     # Specify which GPUs to use
-    gpu_ids = [2, 3, 4, 5, 6, 7]  # Change these to your desired GPU IDs
+    gpu_ids = [0, 1, 2, 3, 4, 5, 6, 7]  # Change these to your desired GPU IDs
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
     
     # Initialize process group for DDP
@@ -182,8 +182,8 @@ def train_whisper():
     train_datasets = []
     eval_datasets = []
     
-    # languages = ['en', 'ru', 'kk', 'tr']
-    languages = ['kk']
+    languages = ['en', 'ru', 'kk', 'tr']
+    # languages = ['en', 'kk']
     
     for lang in languages:
         # Training dataset
@@ -214,7 +214,7 @@ def train_whisper():
             name="whisper-v3-turbo-finetune",
             config={
                 "model_name": "openai/whisper-large-v3-turbo",
-                "learning_rate": 1e-7,
+                "learning_rate": 5.5e-6,
                 "batch_size_per_gpu": batch_size,
                 "total_batch_size": batch_size * world_size,
                 "grad_accumulation": gradient_steps,
@@ -252,7 +252,7 @@ def train_whisper():
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=gradient_steps,
         # gradient_checkpointing=True,
-        learning_rate=1e-7,
+        learning_rate=5.5e-6,
         warmup_ratio=0.01,
         max_steps=num_steps,
         # seed=42,                    # Set random seed for reproducibility
