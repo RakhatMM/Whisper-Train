@@ -22,10 +22,12 @@ class WhisperMultilingualASRDataset(Dataset):
         self.data = []
         self.language = Path(json_file).stem.split('_')[-1]
         self.apply_augmentation = apply_augmentation
+        self.apply_augmentation = apply_augmentation
         if self.apply_augmentation:
-            self.time_stretch = torchaudio.transforms.TimeStretch()
-            self.freq_masking = torchaudio.transforms.FrequencyMasking(freq_mask_param=30)
-            self.time_masking = torchaudio.transforms.TimeMasking(time_mask_param=20)
+            # Whisper uses 128 mel bins, so freq_mask_param should be less than that
+            # self.time_stretch = torchaudio.transforms.TimeStretch(n_freq=128, hop_length=160)
+            self.freq_masking = torchaudio.transforms.FrequencyMasking(freq_mask_param=10)  # about 8% of freq bins
+            self.time_masking = torchaudio.transforms.TimeMasking(time_mask_param=30)
         
         # Language mapping for Whisper
         # self.lang_map = {
@@ -49,32 +51,61 @@ class WhisperMultilingualASRDataset(Dataset):
 
     def __len__(self):
         return len(self.data)
+    
+    def time_stretch_audio(self, audio_waveform, sample_rate, stretch_factor):
+        """
+        Time-stretch an audio waveform using TorchAudio.
 
-    def load_audio(self, audio_path, sampling_rate=16000):
-        speech, sr = torchaudio.load(audio_path)
+        Parameters:
+        - audio_waveform (torch.Tensor): The input audio waveform (1D or 2D tensor).
+        - sample_rate (int): The sampling rate of the audio (e.g., 16000 Hz).
+        - stretch_factor (float): The time-stretch factor (e.g., 1.5 for slower, 0.5 for faster).
 
-        if self.apply_augmentation:
-            # Randomly select from [0.9, 1.0, 1.1]
-            rate = random.choice([0.9, 1.0, 1.1])
-            speech = self.time_stretch(speech, rate)
-            
-        return speech
+        Returns:
+        - torch.Tensor: The time-stretched audio waveform.
+        """
+        # Apply time-stretching with torchaudio.transforms.Resample
+        # Convert to spectrogram for stretching
+        n_fft = 1024
+        hop_length = 160  # Matches 10 ms for 16kHz
+        window = torch.hann_window(n_fft)
+        stft = torch.stft(audio_waveform, n_fft=n_fft, hop_length=hop_length, return_complex=True, window=window)
+
+        # Time stretch
+        time_stretch = torchaudio.transforms.TimeStretch(n_freq=n_fft // 2 + 1, hop_length=hop_length)
+        stretched_stft = time_stretch(stft, stretch_factor)
+
+        # Convert back to waveform
+        stretched_audio = torch.istft(stretched_stft, n_fft=n_fft, hop_length=hop_length, window=window)
+        return stretched_audio
 
     def __getitem__(self, idx):
         try:
             item = self.data[idx]
             
-            # Load and process audio
+            # Load audio
             audio_path = "/raid/rakhat_meiramov/projects/asr/21NovData/Data/" + item['audio_local_path']
-            audio = self.load_audio(audio_path)
-                
+            speech, sr = torchaudio.load(audio_path)
+
+            if sr != 16000:
+                resampler = torchaudio.transforms.Resample(sr, 16000)
+                speech = resampler(speech)
+                sr = 16000
+
+            rate = 1 / random.choice([0.9, 1.0, 1.1])
+            speech = self.time_stretch_audio(audio_waveform=speech, sample_rate=sr, stretch_factor=rate)
+            
             # Get features from processor
             features = self.processor.feature_extractor(
-                audio[0],
+                speech[0],
                 sampling_rate=16000
             ).input_features[0]
 
-            # Apply SpecAugment to the processed features
+            # Convert to tensor since it's numpy array
+            features = torch.from_numpy(features)  # Shape: [128, 3000]
+
+
+            # Apply augmentations to spectrogram
             if self.apply_augmentation:
                 features = self.freq_masking(features)
                 features = self.time_masking(features)
