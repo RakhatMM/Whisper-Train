@@ -9,28 +9,31 @@ from torch.utils.data import Dataset, ConcatDataset
 from transformers import (
     WhisperForConditionalGeneration, 
     WhisperProcessor, 
-    WhisperTokenizer, 
-    WhisperFeatureExtractor,
     Seq2SeqTrainingArguments, 
     Seq2SeqTrainer
 )
-from torch.nn.parallel import DistributedDataParallel
 from dataclasses import dataclass
 from typing import Any, Dict, List, Union
-from torch.utils.data import DataLoader
+import random
+
 
 class WhisperMultilingualASRDataset(Dataset):
-    def __init__(self, json_file, processor=None):
+    def __init__(self, json_file, processor=None, apply_augmentation=True):
         self.data = []
         self.language = Path(json_file).stem.split('_')[-1]
+        self.apply_augmentation = apply_augmentation
+        if self.apply_augmentation:
+            self.time_stretch = torchaudio.transforms.TimeStretch()
+            self.freq_masking = torchaudio.transforms.FrequencyMasking(freq_mask_param=30)
+            self.time_masking = torchaudio.transforms.TimeMasking(time_mask_param=20)
         
         # Language mapping for Whisper
-        self.lang_map = {
-            'en': 'english',
-            'ru': 'russian',
-            'kk': 'kazakh',
-            'tr': 'turkish'
-        }
+        # self.lang_map = {
+        #     'en': 'english',
+        #     'ru': 'russian',
+        #     'kk': 'kazakh',
+        #     'tr': 'turkish'
+        # }
         
         # Initialize processor if not provided
         if processor is None:
@@ -49,6 +52,12 @@ class WhisperMultilingualASRDataset(Dataset):
 
     def load_audio(self, audio_path, sampling_rate=16000):
         speech, sr = torchaudio.load(audio_path)
+
+        if self.apply_augmentation:
+            # Randomly select from [0.9, 1.0, 1.1]
+            rate = random.choice([0.9, 1.0, 1.1])
+            speech = self.time_stretch(speech, rate)
+            
         return speech
 
     def __getitem__(self, idx):
@@ -57,39 +66,29 @@ class WhisperMultilingualASRDataset(Dataset):
             
             # Load and process audio
             audio_path = "/raid/rakhat_meiramov/projects/asr/21NovData/Data/" + item['audio_local_path']
-            if not os.path.exists(audio_path):
-                raise FileNotFoundError(f"Audio file not found: {audio_path}")
-            
             audio = self.load_audio(audio_path)
-            if audio is None:
-                raise ValueError(f"Failed to load audio for index {idx}")
                 
-            # Process features
+            # Get features from processor
             features = self.processor.feature_extractor(
                 audio[0],
                 sampling_rate=16000
             ).input_features[0]
 
-            # Get language and text
-            language = self.lang_map[self.language]
+            # Apply SpecAugment to the processed features
+            if self.apply_augmentation:
+                features = self.freq_masking(features)
+                features = self.time_masking(features)
+
+            # language = self.lang_map[self.language]
             text = item['text']
             
-            # # Add language token to text
-            # text_with_language = f"<|{language}|> {text}"
-            
-            # # Tokenize with language
-            # labels = self.processor.tokenizer(
-            #     text=text_with_language
-            # ).input_ids
-
             prompt_ids = self.processor.tokenizer.get_decoder_prompt_ids(language=self.language, task="transcribe") 
             labels = self.processor.tokenizer(text=text).input_ids 
             
-            result = {
+            return {
                 "input_features": features,
                 "labels": labels
             }
-            return result
         except Exception as e:
             print(f"Error in __getitem__ for index {idx}: {e}")
             return None
@@ -140,7 +139,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
 def train_whisper():
     # Specify which GPUs to use
-    gpu_ids = [0, 1, 2, 3, 4, 5, 6, 7]  # Change these to your desired GPU IDs
+    gpu_ids = [ 4, 5, 6, 7]  # Change these to your desired GPU IDs
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
     
     # Initialize process group for DDP
@@ -190,20 +189,25 @@ def train_whisper():
         train_file = f"{data_dir}/train_asr_{lang}.json"
         if Path(train_file).exists():
             train_datasets.append(
-                WhisperMultilingualASRDataset(train_file, processor=processor)
+                WhisperMultilingualASRDataset(train_file, processor=processor, apply_augmentation=True)
+            )
+            train_datasets.append(
+                WhisperMultilingualASRDataset(train_file, processor=processor, apply_augmentation=True)
             )
         
         # Validation dataset
         val_file = f"{data_dir}/dev_asr_{lang}.json"
         if Path(val_file).exists():
             eval_datasets.append(
-                WhisperMultilingualASRDataset(val_file, processor=processor)
+                WhisperMultilingualASRDataset(val_file, processor=processor, apply_augmentation=False)
             )
 
     # Combine datasets
     train_dataset = ConcatDataset(train_datasets)
     eval_dataset = ConcatDataset(eval_datasets)
     num_steps = calculate_steps_per_epoch(train_dataset, batch_size, torch.cuda.device_count(), gradient_steps) * epochs
+    steps_per_epoch = calculate_steps_per_epoch(train_dataset, batch_size, torch.cuda.device_count(), gradient_steps)
+    # num_steps = 63560 + 3 * steps_per_epoch
 
     if local_rank == 0:
         print(f"Using GPUs: {gpu_ids}")
@@ -244,10 +248,11 @@ def train_whisper():
         return {"wer": wer * 100}
 
     
-
+    # checkpoint_path = "/raid/rakhat_meiramov/projects/asr/whisper-large-v3-turbo-finetuned/checkpoint-63560"
     # Define training arguments
     training_args = Seq2SeqTrainingArguments(
         output_dir="./whisper-large-v3-turbo-finetuned",
+        # resume_from_checkpoint=checkpoint_path,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=gradient_steps,
@@ -259,11 +264,11 @@ def train_whisper():
         # data_seed=42,
         fp16=True,
         evaluation_strategy="steps",
-        eval_steps=num_steps//(epochs*4), 
+        eval_steps=steps_per_epoch//4, 
         save_strategy="steps",
         predict_with_generate=True,
         generation_max_length=225,
-        save_steps=num_steps//(epochs*4),
+        save_steps=steps_per_epoch//4,
         logging_strategy="steps",
         logging_steps=50,
         load_best_model_at_end=True,
